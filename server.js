@@ -1,0 +1,104 @@
+import express from "express";
+import cors from "cors";
+import dotenv from "dotenv";
+import { connectDB } from "./config/db.js";
+import { errorHandler } from "./middleware/errorHandler.js";
+import { startPriceTrackerJob } from "./cron/priceTracker.job.js";
+import productRoutes from "./routes/product.routes.js";
+import searchRoutes from "./routes/search.routes.js";
+import authRoutes from "./routes/auth.routes.js";
+import watchlistRoutes from "./routes/watchlist.routes.js";
+import adminRoutes from "./routes/admin.routes.js";
+import path from "path";
+import { fileURLToPath } from "url";
+
+dotenv.config();
+
+const app = express();
+const PORT = process.env.PORT || 5000;
+const isProduction = process.env.NODE_ENV === "production";
+const allowedOrigins = [
+    process.env.CLIENT_URL,
+    ...(process.env.CLIENT_URLS || "").split(","),
+]
+    .map((origin) => origin?.trim())
+    .filter(Boolean);
+
+// ── Security & parsing middleware ─────────────────────────────────────────────
+app.use(
+    cors({
+        origin(origin, callback) {
+            if (!origin) return callback(null, true);
+            if (allowedOrigins.includes(origin)) return callback(null, true);
+
+            // During local development, Vite may pick a different localhost port.
+            if (!isProduction && (/^http:\/\/localhost:\d+$/i.test(origin) || /^http:\/\/127\.0\.0\.1:\d+$/i.test(origin))) {
+                return callback(null, true);
+            }
+
+            return callback(new Error("Not allowed by CORS"));
+        },
+        methods: ["GET", "POST", "PUT", "PATCH", "DELETE"],
+        allowedHeaders: ["Content-Type", "Authorization"],
+    })
+);
+app.use(express.json({ limit: "10kb" })); // Guard against large payload attacks
+app.use(express.urlencoded({ extended: true, limit: "10kb" }));
+
+// ── Health check ──────────────────────────────────────────────────────────────
+app.get("/api/health", (req, res) => {
+    res.status(200).json({
+        success: true,
+        message: "SmartCart API is running",
+        environment: process.env.NODE_ENV || "development",
+        timestamp: new Date().toISOString(),
+    });
+});
+
+// ── Feature routes ────────────────────────────────────────────────────────────
+app.use("/api/products", productRoutes);
+app.use("/api/search", searchRoutes);
+app.use("/api/auth", authRoutes);
+app.use("/api/watchlist", watchlistRoutes);
+app.use("/api/admin", adminRoutes);
+
+// ── Serve Frontend static files in production ────────────────────────────────
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+if (process.env.NODE_ENV === "production") {
+    // Set static folder
+    app.use(express.static(path.join(__dirname, "frontend/dist")));
+
+    // Any route that is not an API route should serve the index.html
+    app.get(/.*/, (req, res, next) => {
+        if (req.originalUrl.startsWith("/api")) {
+            return next();
+        }
+        res.sendFile(path.resolve(__dirname, "frontend", "dist", "index.html"));
+    });
+}
+
+// ── 404 catch-all ────────────────────────────────────────────────────────────
+app.use((req, res) => {
+    res.status(404).json({ success: false, message: `Route ${req.originalUrl} not found` });
+});
+
+// ── Centralized error handler (must be last) ─────────────────────────────────
+app.use(errorHandler);
+
+// ── Bootstrap ────────────────────────────────────────────────────────────────
+const startServer = async () => {
+    try {
+        await connectDB();
+        startPriceTrackerJob(); // Init background scraping cycle
+        app.listen(PORT, () => {
+            console.log(`🚀 SmartCart server running on port ${PORT}`);
+        });
+    } catch (error) {
+        console.error("Failed to start server:", error.message);
+        process.exit(1);
+    }
+};
+
+startServer();
